@@ -1,16 +1,21 @@
-import numpy as np
 import matplotlib.pyplot as plt
-from nn import MLP
-from optimizer import Optimizer
+import nn
 import random as rand
 from node import Node
+import torchvision
+import torch
 
-steps = 50
+# rand.seed(42)
+# torch.manual_seed(0)
+
+steps = 100
 batch_size = 32
-lr = 0.01
+lr = 3e-3
+
+is_torch = True
 
 
-def standardize(data: list[dict[str, any]], category: str, feature_idx) -> None:
+def standardize(data: list[dict[str, any]], category: str, feature_idx):
     features = [line[category][feature_idx] for line in data]
 
     mean = sum(features) / len(features)
@@ -18,44 +23,98 @@ def standardize(data: list[dict[str, any]], category: str, feature_idx) -> None:
     variance = sum(deviations) / len(features)
     std_dev = variance**0.5
 
-    for i in range(len(features)):
+    for i in range(len(data)):
         data[i][category][feature_idx] = (features[i] - mean) / std_dev
+
+    return mean, std_dev
 
 
 def loss_fn(outputs: list[list[Node]], targets: list[int]):
-    accuracy = 0.0
+    if is_torch:
+        loss = torch.functional.F.cross_entropy(outputs, targets)
+        acc = 0.0
 
-    probs = [probs[target] for probs, target in zip(outputs, targets)]
+        for i in range(len(outputs)):
+            if outputs[i].argmax() == targets[i]:
+                acc += 1
 
-    for prob in probs:
-        if prob.value > 0.5:
-            accuracy += 1
+        return loss, acc / len(outputs)
 
-    log_probs = [p.log() for p in probs]
-    loss = -sum(log_probs) / len(log_probs)
+    else:
+        accuracy = 0.0
+        probs = [probs[target] for probs, target in zip(outputs, targets)]
 
-    return loss, accuracy / len(probs)
+        for prob in probs:
+            if prob.value > 0.5:
+                accuracy += 1
+
+        log_probs = [p.log() for p in probs]
+        loss = -sum(log_probs) / len(log_probs)
+
+        return loss, accuracy / len(probs)
 
 
-def train(model: MLP, optimizer, x: list[list[float]], y: list[int]):
+def train(model: nn.MLP, optimizer, x: list[list[float]], y: list[int]):
+    stats = []
+    x_train, y_train, x_test, y_test = get_splits(x, y, 0.9)
+
     for i in range(steps):
 
         # make batch
-        idx = [rand.randint(0, len(x) - 1) for _ in range(batch_size)]
-        x_batch = [x[i] for i in idx]
-        y_batch = [y[i] for i in idx]
+        idx = rand.sample(range(len(x_train) - 1), batch_size)
+        x_batch = [x_train[i] for i in idx]
+        y_batch = [y_train[i] for i in idx]
 
-        outputs = list(map(model, x_batch))
+        if is_torch:
+            x_batch = torch.tensor(x_batch)
+            y_batch = torch.tensor(y_batch)
+            outputs = model(x_batch)
+        else:
+            outputs = list(map(model, x_batch))
+
         loss, acc = loss_fn(outputs, y_batch)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        print(f"Step {i + 1}/{steps}, loss: {loss.value:.4f}, accuracy: {acc * 100}%")
+        # --- test batch ---
+        if is_torch:
+            x_test_batch = torch.tensor(x_test)
+            y_test_batch = torch.tensor(y_test)
+            test_outputs = model(x_test_batch)
+        else:
+            test_outputs = list(map(model, x_test_batch))
+
+        test_loss, test_acc = loss_fn(test_outputs, y_test_batch)
+        # --- test batch ---
+
+        print(
+            f"is_torch: {is_torch}, step {i + 1}/{steps}, loss: {loss.item():.4f}, acc: {(acc * 100):.1f}%, test loss: {test_loss.item():.4f}, test acc: {(test_acc * 100):.1f}%"
+        )
+
+        stats.append(
+            {
+                "train_loss": loss.item(),
+                "train_acc": acc,
+                "test_loss": test_loss.item(),
+                "test_acc": test_acc,
+            }
+        )
+
+    return stats
 
 
-def get_splits(x: list[dict[str, any]], y: list[int], ratio: float):
+def plot_stats(stats):
+    plt.plot([s["train_loss"] for s in stats], label="train loss")
+    plt.plot([s["test_loss"] for s in stats], label="test loss")
+    plt.plot([s["train_acc"] for s in stats], label="train acc")
+    plt.plot([s["test_acc"] for s in stats], label="test acc")
+    plt.legend(loc="upper right")
+    plt.show()
+
+
+def get_splits(x: list[list[float]], y: list[int], ratio: float):
     split_idx = int(len(x) * ratio)
     x_train = x[:split_idx]
     y_train = y[:split_idx]
@@ -65,15 +124,23 @@ def get_splits(x: list[dict[str, any]], y: list[int], ratio: float):
     return x_train, y_train, x_test, y_test
 
 
+def save_features_scales(scales):
+    with open("scales.csv", "w") as f:
+        f.write("mean,std_dev\n")
+        for scale in scales:
+            f.write(f"{scale[0]},{scale[1]}\n")
+
+
 try:
     with open("data.csv") as f:
-        raw_data = f.read()
+        raw_data = f.readlines()
 
 except FileNotFoundError:
     print("Could not open file")
 
 else:
-    raw_lines = [line.split(",") for line in raw_data.split("\n")][:-1]
+    raw_lines = [line.split(",") for line in raw_data]
+    rand.shuffle(raw_lines)
     x = [
         {
             "mean": [float(n) for n in line[2:12]],
@@ -82,15 +149,30 @@ else:
         }
         for line in raw_lines
     ]
-    y = [(0 if line[1] == "B" else 1) for line in raw_lines]
+    y = [int(line[1] == "M") for line in raw_lines]
 
+    data_scales = []  # mean, std_dev
     for category in ["mean", "std_err", "worst"]:
         for i in range(10):
-            standardize(x, category, i)
+            scales = standardize(x, category, i)
+            data_scales.append(scales)
 
-    model = MLP([10, 24, 24, 24, 2])
-    print(f"number of parameters: {len(model.parameters())}")
-    optimizer = Optimizer(model.parameters(), lr)
+    save_features_scales(data_scales)
 
-    x_train, y_train, x_test, y_test = get_splits(x, y, 0.9)
-    train(model, optimizer, [xi["mean"] for xi in x_train], y_train)
+    if is_torch:
+        model = torchvision.ops.MLP(30, [16, 16, 2], activation_layer=torch.nn.Tanh)
+        print(f"number of parameters: {sum([p.numel() for p in model.parameters()])}")
+        optimizer = torch.optim.AdamW(model.parameters(), lr)
+    else:
+        model = nn.MLP([30, 16, 16, 2], activation=nn.TanH())
+        optimizer = nn.AdamW(model.parameters(), lr)
+        print(f"number of parameters: {len(model.parameters())}")
+
+    features = [xi["mean"] + xi["std_err"] + xi["worst"] for xi in x]
+    stats = train(model, optimizer, features, y)
+    plot_stats(stats)
+
+    if is_torch:
+        torch.save(model.state_dict(), "mlp.pt")
+    else:
+        model.save("mlp.wei")

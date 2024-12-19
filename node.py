@@ -8,6 +8,9 @@ class Node:
         self._prev = set(prev)
         self._backward = lambda: None
 
+    def item(self):
+        return self.value
+
     def __add__(self, other) -> "Node":
         other = other if isinstance(other, Node) else Node(other)
         out = Node(self.value + other.value, (self, other))
@@ -124,6 +127,21 @@ class Node:
 
     def __repr__(self):
         return f"Node({self.value})"
+
+    # def __lt__(self, other) -> bool:
+    #     return self.value < other.value
+
+    # def __le__(self, other) -> bool:
+    #     return self.value <= other.value
+
+    # def __gt__(self, other) -> bool:
+    #     return self.value > other.value
+
+    # def __ge__(self, other) -> bool:
+    #     return self.value >= other.value
+
+    # def __eq__(self, other) -> bool:
+    #     return self.value == other.value
 
     def backward(self):
         topological = []

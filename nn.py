@@ -1,5 +1,6 @@
 import random
 from node import Node
+from typing import Callable
 
 
 class Optimizer:
@@ -65,45 +66,62 @@ class AdamW(Optimizer):
         self.t += 1
 
 
+class Dropout:
+    def __init__(self, p: float):
+        self.p = p
+
+    def __call__(self, x):
+        return [xi * (random.random() > self.p) for xi in x]
+
+    def __repr__(self):
+        return f"Dropout: {self.p:.2f}"
+
+
 class TanH:
-    def __call__(self, x: Node):
-        return x.tanh()
+    def __call__(self, x):
+        return [xi.tanh() for xi in x]
+
+    def __repr__(self):
+        return "Activation: TanH"
 
 
 class Sigmoid:
-    def __call__(self, x: Node):
-        return x.sigmoid()
+    def __call__(self, x):
+        return [xi.sigmoid() for xi in x]
+
+    def __repr__(self):
+        return "Activation: Sigmoid"
 
 
 class ReLu:
-    def __call__(self, x: Node):
-        return x.relu()
+    def __call__(self, x):
+        return [xi.relu() for xi in x]
+
+    def __repr__(self):
+        return "Activation: ReLu"
 
 
 class Neuron:
-    def __init__(self, input_size: int, bias: bool = True, activation=None):
+    def __init__(self, input_size: int, bias: bool = True):
         limit = (1 / input_size) ** 0.5
 
         self.weights = [Node(random.uniform(-limit, limit)) for _ in range(input_size)]
         self.with_bias = bias
         self.bias = Node(0)
-        self.activation = activation
 
     def __call__(self, x: list[float]):
         x = sum([w * x for w, x in zip(self.weights, x)]) + self.bias
-        return self.activation(x) if self.activation else x
+        return x
 
     def parameters(self):
         return self.weights + ([self.bias] if self.with_bias else [])
 
 
 class Layer:
-    def __init__(self, input_size: int, output_size: int, activation):
-        print(f"Layer: {input_size} -> {output_size}, activation: {activation}")
-
-        self.neurons = [
-            Neuron(input_size, activation=activation) for _ in range(output_size)
-        ]
+    def __init__(self, input_size: int, output_size: int):
+        self.neurons = [Neuron(input_size) for _ in range(output_size)]
+        self.inp = input_size
+        self.out = output_size
 
     def __call__(self, x: list[float]):
         return [neuron(x) for neuron in self.neurons]
@@ -111,21 +129,27 @@ class Layer:
     def parameters(self):
         return [p for neuron in self.neurons for p in neuron.parameters()]
 
+    def __repr__(self):
+        return f"Linear: {self.inp} -> {self.out}"
+
 
 class MLP:
-    def __init__(self, sizes: list[int], activation):
-        self.layers = [
-            Layer(
-                sizes[i],
-                sizes[i + 1],
-                activation=(activation if i < len(sizes) - 2 else None),
-            )
-            for i in range(len(sizes) - 1)
-        ]
+    def __init__(self, sizes: list[int], activation: Callable = None, dropout=0.0):
+        self.layers = []
+        self.is_eval = False
+
+        for i in range(len(sizes) - 1):
+            self.layers.append(Layer(sizes[i], sizes[i + 1]))
+            if activation is not None and i < len(sizes) - 2:
+                self.layers.append(activation())
+            if dropout > 0.0:
+                self.layers.append(Dropout(dropout))
 
     def __call__(self, x):
         for layer in self.layers:
-            x = layer(x)
+            # no dropout in eval mode
+            if not (self.is_eval and isinstance(layer, Dropout)):
+                x = layer(x)
 
         # minus max value for numerical stability
         max_val = max([xi.value for xi in x])
@@ -135,8 +159,15 @@ class MLP:
 
         return probabilities
 
+    def train(self):
+        self.is_eval = False
+
+    def eval(self):
+        self.is_eval = True
+
     def parameters(self):
-        return [p for layer in self.layers for p in layer.parameters()]
+        layers = [l for l in self.layers if hasattr(l, "parameters")]
+        return [p for l in layers for p in l.parameters()]
 
     def save(self, path: str):
         try:
@@ -160,3 +191,6 @@ class MLP:
                 print(f"Loaded weights from '{path}'")
         except:
             print(f"Could not load weights from file '{path}'")
+
+    def __repr__(self):
+        return "\n".join([str(layer) for layer in self.layers])

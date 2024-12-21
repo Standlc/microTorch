@@ -5,12 +5,13 @@ from node import Node
 import torchvision
 import torch
 
-# rand.seed(42)
-# torch.manual_seed(0)
+rand.seed(42)
+torch.manual_seed(0)
 
 steps = 100
 batch_size = 32
-lr = 3e-3
+lr = 2e-3
+reg_lambda = 1e-2
 
 is_torch = True
 
@@ -29,27 +30,30 @@ def standardize(data: list[dict[str, any]], category: str, feature_idx):
     return mean, std_dev
 
 
-def loss_fn(outputs: list[list[Node]], targets: list[int]):
+def loss_fn(outputs: list[list[Node]], targets: list[int], parameters):
     if is_torch:
-        loss = torch.functional.F.cross_entropy(outputs, targets)
         acc = 0.0
-
         for i in range(len(outputs)):
             if outputs[i].argmax() == targets[i]:
                 acc += 1
 
-        return loss, acc / len(outputs)
+        loss = torch.functional.F.cross_entropy(outputs, targets)
+        reg_loss = sum([p.pow(2).sum() for p in parameters]) * reg_lambda
+        total_loss = loss + reg_loss
+
+        return total_loss, acc / len(outputs)
 
     else:
-        accuracy = 0.0
         probs = [probs[target] for probs, target in zip(outputs, targets)]
 
+        accuracy = 0.0
         for prob in probs:
-            if prob.value > 0.5:
-                accuracy += 1
+            accuracy += prob.value > 0.5
 
         log_probs = [p.log() for p in probs]
+        reg_loss = sum([p.value**2 for p in parameters]) * reg_lambda
         loss = -sum(log_probs) / len(log_probs)
+        loss += reg_loss
 
         return loss, accuracy / len(probs)
 
@@ -58,7 +62,13 @@ def train(model: nn.MLP, optimizer, x: list[list[float]], y: list[int]):
     stats = []
     x_train, y_train, x_test, y_test = get_splits(x, y, 0.9)
 
+    if is_torch:
+        parameters = [p for p in model.parameters()]
+    else:
+        parameters = model.parameters()
+
     for i in range(steps):
+        optimizer.zero_grad()
 
         # make batch
         idx = rand.sample(range(len(x_train) - 1), batch_size)
@@ -72,22 +82,21 @@ def train(model: nn.MLP, optimizer, x: list[list[float]], y: list[int]):
         else:
             outputs = list(map(model, x_batch))
 
-        loss, acc = loss_fn(outputs, y_batch)
+        loss, acc = loss_fn(outputs, y_batch, parameters)
 
-        optimizer.zero_grad()
+        # --- test loss ---
+        if is_torch:
+            x_test = torch.tensor(x_test)
+            y_test = torch.tensor(y_test)
+            test_outputs = model(x_test)
+        else:
+            test_outputs = list(map(model, x_test))
+
+        test_loss, test_acc = loss_fn(test_outputs, y_test, parameters)
+        # --- test loss ---
+
         loss.backward()
         optimizer.step()
-
-        # --- test batch ---
-        if is_torch:
-            x_test_batch = torch.tensor(x_test)
-            y_test_batch = torch.tensor(y_test)
-            test_outputs = model(x_test_batch)
-        else:
-            test_outputs = list(map(model, x_test_batch))
-
-        test_loss, test_acc = loss_fn(test_outputs, y_test_batch)
-        # --- test batch ---
 
         print(
             f"is_torch: {is_torch}, step {i + 1}/{steps}, loss: {loss.item():.4f}, acc: {(acc * 100):.1f}%, test loss: {test_loss.item():.4f}, test acc: {(test_acc * 100):.1f}%"
@@ -164,15 +173,16 @@ else:
         print(f"number of parameters: {sum([p.numel() for p in model.parameters()])}")
         optimizer = torch.optim.AdamW(model.parameters(), lr)
     else:
-        model = nn.MLP([30, 16, 16, 2], activation=nn.TanH())
+        model = nn.MLP([30, 16, 16, 2], activation=nn.TanH)
         optimizer = nn.AdamW(model.parameters(), lr)
         print(f"number of parameters: {len(model.parameters())}")
+        print(model)
 
     features = [xi["mean"] + xi["std_err"] + xi["worst"] for xi in x]
     stats = train(model, optimizer, features, y)
     plot_stats(stats)
 
     if is_torch:
-        torch.save(model.state_dict(), "mlp.pt")
+        torch.save(model.state_dict(), "mlp-l2-reg.pt")
     else:
-        model.save("mlp.wei")
+        model.save("mlp-l2-reg.wei")
